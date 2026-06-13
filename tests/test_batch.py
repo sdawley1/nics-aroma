@@ -19,7 +19,9 @@ from typing import List, Tuple
 import numpy as np
 
 # ----- local modules -----
-from aroma.batch import scan_paths
+from aroma.batch import scan_paths, select_rings
+from aroma.io import load_geometry
+from aroma.rings import is_planar
 
 # ============================================================
 # MOCK BACKEND
@@ -54,3 +56,11 @@ def test_scan_paths_covers_every_ring(data_dir: Path) -> None:
 
     assert seen.count(("benzene.in", 6)) == 1
     assert seen.count(("phenalene.in", 6)) == 3
+
+
+def test_select_rings_planar_only(data_dir: Path) -> None:
+    """`planar_only` keeps phenalene's three (planar) rings and they stay planar."""
+    mol = load_geometry(data_dir / "phenalene/phenalene.in")
+    rings = select_rings(mol, "auto", planar_only=True)
+    assert len(rings) == 3
+    assert all(is_planar(mol.coords, ring) for ring in rings)

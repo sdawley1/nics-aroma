@@ -32,6 +32,12 @@ aroma scan benzene.com --method b3lyp --basis 6-311+g* --range 0 4 --step 0.1
 # Restrict to a specific ring by 1-based atom indices.
 aroma scan indene.xyz --ring 1,2,3,4,5
 
+# Keep only planar (aromatic-like) rings when perceiving automatically.
+aroma scan phenalene.com --planar-only
+
+# In-plane (XY) NICS map on a plane above the ring.
+aroma xyscan benzene.com --half-extent 2.0 --step 0.5 --height 1.7
+
 # Scan several geometries in one process.
 aroma batch a.com b.com c.log --method hf --basis sto-3g
 ```

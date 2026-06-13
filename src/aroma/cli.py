@@ -35,9 +35,10 @@ from aroma.constants import (
     DEFAULT_BQ_STEP,
     DEFAULT_FIT_START,
     DEFAULT_METHOD,
+    DEFAULT_XY_DISTANCE,
 )
 from aroma.io import load_geometry
-from aroma.nics import NicsResult, run_nics_scan
+from aroma.nics import NicsResult, XyNicsResult, run_nics_scan, run_xy_scan
 
 # ============================================================
 # CONSTANTS
@@ -77,6 +78,24 @@ def _print_scan(ring: List[int], result: NicsResult, fit_start: float) -> None:
     )
 
 
+def _print_xy_scan(ring: List[int], result: XyNicsResult) -> None:
+    """Print one ring's in-plane NICS table over the XY scan grid."""
+    one_based = ",".join(str(a + 1) for a in ring)
+    print(f"\n# Ring atoms (1-based): {one_based}", flush=True)
+    print(
+        f"# {'x':>6} {'y':>6} {'iso':>10} {'zz':>10} {'oop':>10} {'inp':>10}",
+        flush=True,
+    )
+    for x, y, iso, zz, oop, inp in zip(
+        result.xs, result.ys, result.nics_iso,
+        result.nics_zz, result.nics_oop, result.nics_inp,
+    ):
+        print(
+            f"  {x:6.2f} {y:6.2f} {iso:10.3f} {zz:10.3f} {oop:10.3f} {inp:10.3f}",
+            flush=True,
+        )
+
+
 # ============================================================
 # SCAN COMMAND
 # ============================================================
@@ -103,7 +122,7 @@ def _run_scan(args: argparse.Namespace) -> int:
         return 2
 
     mol = load_geometry(args.geometry)
-    rings = select_rings(mol, args.ring)
+    rings = select_rings(mol, args.ring, args.planar_only)
     start, stop = args.range
     print(
         f"# {args.geometry.name}: {len(rings)} ring(s), "
@@ -113,6 +132,28 @@ def _run_scan(args: argparse.Namespace) -> int:
     for ring in rings:
         result = run_nics_scan(mol, ring, backend, start, stop, args.step)
         _print_scan(ring, result, args.fit_start)
+    return 0
+
+
+def _run_xyscan(args: argparse.Namespace) -> int:
+    """Execute the ``xyscan`` subcommand (in-plane scan); return exit code."""
+    backend = _load_backend(args.method, args.basis)
+    if backend is None:
+        return 2
+
+    mol = load_geometry(args.geometry)
+    rings = select_rings(mol, args.ring, args.planar_only)
+    print(
+        f"# {args.geometry.name}: {len(rings)} ring(s), "
+        f"{args.method}/{args.basis}, xy half-extent {args.half_extent} A "
+        f"at z={args.height} A",
+        flush=True,
+    )
+    for ring in rings:
+        result = run_xy_scan(
+            mol, ring, backend, args.half_extent, args.step, args.height
+        )
+        _print_xy_scan(ring, result)
     return 0
 
 
@@ -126,7 +167,7 @@ def _run_batch(args: argparse.Namespace) -> int:
     print(f"# batch: {len(args.geometries)} file(s), {args.method}/{args.basis}",
           flush=True)
     for path, ring, result in scan_paths(
-        args.geometries, backend, start, stop, args.step
+        args.geometries, backend, start, stop, args.step, args.planar_only
     ):
         print(f"\n## {path.name}", flush=True)
         _print_scan(ring, result, args.fit_start)
@@ -138,11 +179,21 @@ def _run_batch(args: argparse.Namespace) -> int:
 # ============================================================
 
 
-def _add_common_options(p: argparse.ArgumentParser) -> None:
-    """Add the method/basis/grid/analysis options shared by scan and batch."""
+def _add_selection_options(p: argparse.ArgumentParser) -> None:
+    """Add the method/basis/ring-selection options shared by all scan commands."""
     # ----- method -----
     p.add_argument("--method", default=DEFAULT_METHOD, help="'hf' or a DFT functional")
     p.add_argument("--basis", default=DEFAULT_BASIS, help="orbital basis set")
+    # ----- ring selection -----
+    p.add_argument(
+        "--planar-only", action="store_true",
+        help="keep only planar rings when perceiving rings automatically",
+    )
+
+
+def _add_common_options(p: argparse.ArgumentParser) -> None:
+    """Add the method/basis/grid/analysis options shared by scan and batch."""
+    _add_selection_options(p)
     # ----- grid -----
     p.add_argument(
         "--range", nargs=2, type=float, default=list(DEFAULT_BQ_RANGE),
@@ -178,6 +229,28 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument("geometries", type=Path, nargs="+", help="geometry files")
     _add_common_options(batch)
     batch.set_defaults(func=_run_batch)
+
+    xyscan = sub.add_parser("xyscan", help="in-plane (XY) NICS scan above a ring")
+    xyscan.add_argument(
+        "geometry", type=Path, help="geometry file (.com/.log/.xyz/...)"
+    )
+    xyscan.add_argument(
+        "--ring", default="auto",
+        help="'auto' (perceive rings) or comma-separated 1-based atom indices",
+    )
+    _add_selection_options(xyscan)
+    xyscan.add_argument(
+        "--half-extent", type=float, default=2.0,
+        help="half-width of the square scan region (angstrom)",
+    )
+    xyscan.add_argument(
+        "--step", type=float, default=DEFAULT_BQ_STEP, help="lattice spacing (angstrom)"
+    )
+    xyscan.add_argument(
+        "--height", type=float, default=DEFAULT_XY_DISTANCE,
+        help="scan-plane height above the ring (angstrom)",
+    )
+    xyscan.set_defaults(func=_run_xyscan)
     return parser
 
 

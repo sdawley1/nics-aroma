@@ -20,7 +20,7 @@ import numpy as np
 # ----- local modules -----
 from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.io import load_geometry
-from aroma.nics import run_nics_scan
+from aroma.nics import run_nics_scan, run_xy_scan
 from aroma.rings import find_rings
 
 # ============================================================
@@ -59,4 +59,19 @@ def test_scan_sign_conventions(data_dir: Path) -> None:
     assert np.allclose(result.nics_iso, -(10.0 + 10.0 + 40.0) / 3.0)
     assert np.allclose(result.nics_zz, -40.0)
     assert np.allclose(result.nics_oop, -40.0)
+    assert np.allclose(result.nics_inp, -10.0)
+
+
+def test_xy_scan_grid_and_signs(data_dir: Path) -> None:
+    """The in-plane scan covers the full lattice and negates the shielding."""
+    mol = load_geometry(data_dir / "benzene/benzene.in")
+    adj = adjacency_list(bond_matrix(mol))
+    ring = find_rings(adj)[0]
+
+    backend = _ConstantBackend(in_plane=10.0, out_of_plane=40.0)
+    result = run_xy_scan(mol, ring, backend, half_extent=1.0, step=0.5, height=1.7)
+
+    assert result.xs.shape == (25,)  # 5 x 5 lattice
+    assert result.ys.shape == (25,)
+    assert np.allclose(result.nics_zz, -40.0)
     assert np.allclose(result.nics_inp, -10.0)

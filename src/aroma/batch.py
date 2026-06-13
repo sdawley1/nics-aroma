@@ -26,14 +26,16 @@ from aroma.constants import DEFAULT_BQ_RANGE, DEFAULT_BQ_STEP
 from aroma.io import load_geometry
 from aroma.molecule import Molecule
 from aroma.nics import NicsResult, run_nics_scan
-from aroma.rings import find_rings, order_ring
+from aroma.rings import find_rings, is_planar, order_ring
 
 # ============================================================
 # RING SELECTION
 # ============================================================
 
 
-def select_rings(mol: Molecule, spec: str = "auto") -> List[List[int]]:
+def select_rings(
+    mol: Molecule, spec: str = "auto", planar_only: bool = False
+) -> List[List[int]]:
     """Return ordered rings, auto-perceived or parsed from a 1-based spec.
 
     Parameters
@@ -43,6 +45,9 @@ def select_rings(mol: Molecule, spec: str = "auto") -> List[List[int]]:
     spec : str
         ``"auto"`` to perceive all rings, or comma-separated 1-based atom
         indices naming a single ring.
+    planar_only : bool
+        When ``True`` (auto mode only), keep only planar rings, approximating
+        an aromatic-ring filter.
 
     Returns
     -------
@@ -52,6 +57,9 @@ def select_rings(mol: Molecule, spec: str = "auto") -> List[List[int]]:
     if spec == "auto":
         rings = find_rings(adj)
         assert rings, "no rings detected; specify the ring explicitly"
+        if planar_only:
+            rings = [r for r in rings if is_planar(mol.coords, r)]
+            assert rings, "no planar rings detected; rerun without --planar-only"
         return rings
     atoms = [int(tok) - 1 for tok in spec.split(",")]
     assert all(0 <= a < mol.n_atoms for a in atoms), "ring atom index out of range"
@@ -69,6 +77,7 @@ def scan_paths(
     start: float = DEFAULT_BQ_RANGE[0],
     stop: float = DEFAULT_BQ_RANGE[1],
     step: float = DEFAULT_BQ_STEP,
+    planar_only: bool = False,
 ) -> Iterator[Tuple[Path, List[int], NicsResult]]:
     """Yield (path, ring, result) for every perceived ring of every geometry.
 
@@ -80,6 +89,8 @@ def scan_paths(
         Shared shielding backend.
     start, stop, step : float
         Axial scan grid parameters (angstrom).
+    planar_only : bool
+        Restrict each geometry's rings to the planar ones.
 
     Yields
     ------
@@ -89,5 +100,5 @@ def scan_paths(
     assert paths, "no geometries to process"
     for path in paths:
         mol = load_geometry(path)
-        for ring in select_rings(mol, "auto"):
+        for ring in select_rings(mol, "auto", planar_only):
             yield path, ring, run_nics_scan(mol, ring, backend, start, stop, step)

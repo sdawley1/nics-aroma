@@ -48,8 +48,9 @@ COVALENT_RADII: Dict[int, float] = {
     14: 1.11, 15: 1.06, 16: 1.02, 17: 0.99, 18: 0.97, 22: 1.32,
 }
 
-# Highest atomic number present in the tables; bounds the radius array.
-_MAX_Z = max(COVALENT_RADII)
+# Atomic number through which the radius array is defined; covers the whole
+# periodic table so any real element can index it (missing Z use the default).
+_MAX_Z = 118
 
 # ============================================================
 # LOOKUPS

@@ -5,7 +5,7 @@ Reader for Gaussian formatted-checkpoint files (.fchk).
 
 Pure-Python parsing of the geometry, charge, and multiplicity. Unlike the legacy
 code this does not invoke ``formchk``; supply an already-formatted ``.fchk``
-(produce one on a login node with ``formchk file.chk``).
+(produce one with ``formchk file.chk``).
 
 Sam Dawley
 06/2026

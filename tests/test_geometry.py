@@ -22,6 +22,7 @@ from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.geometry import polygon_area, rodrigues_matrix
 from aroma.grid import axial_grid, xy_scan_grid
 from aroma.io import load_geometry
+from aroma.molecule import Molecule
 from aroma.reorient import reorient_ring_to_xy
 from aroma.rings import find_rings, is_planar
 
@@ -44,6 +45,17 @@ def test_benzene_ring_is_planar(data_dir: Path) -> None:
     ring = find_rings(adj)[0]
     assert is_planar(mol.coords, ring)
     assert 4.5 < polygon_area(mol.coords, ring) < 6.0
+
+
+def test_bond_matrix_handles_heavy_elements() -> None:
+    """Elements heavier than the radius table (e.g. Br, Z=35) must not overflow."""
+    mol = Molecule(
+        numbers=np.array([35, 35], dtype=np.int_),
+        coords=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.2]], dtype=np.float64),
+    )
+    bonds = bond_matrix(mol)
+    assert bonds.shape == (2, 2)
+    assert bool(bonds[0, 1]) and bool(bonds[1, 0])
 
 
 # ============================================================
