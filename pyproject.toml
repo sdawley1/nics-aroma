@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aroma-nics"
+version = "0.1.0"
+description = "Nucleus-independent chemical shift (NICS) scans via PySCF GIAO NMR."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Sam Dawley", email = "sd2402@princeton.edu" }]
+keywords = ["nics", "aromaticity", "nmr", "chemistry", "pyscf"]
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+[project.optional-dependencies]
+# PySCF NMR shielding lives in the separate `properties` extension. It carries no
+# PyPI/compatibility guarantee, so it is an opt-in extra and pinned by the user.
+pyscf = [
+    "pyscf>=2.3",
+    "pyscf-properties @ git+https://github.com/pyscf/properties",
+]
+dev = [
+    "pytest>=7",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+aroma = "aroma.cli:main"
+
+[tool.hatch.metadata]
+# Required for the git+ reference to the PySCF properties extension below.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aroma"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# heart.md §9 mandates typing-module generics (List/Dict/Tuple/Optional) rather
+# than builtin subscript syntax, so the pyupgrade rules that rewrite them off.
+ignore = ["UP006", "UP035"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+# PySCF and SciPy ship no (complete) type stubs for the modules used here.
+module = ["pyscf.*", "scipy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = ["slow: PySCF SCF/NMR integration tests (deselect with -m 'not slow')"]
+testpaths = ["tests"]
