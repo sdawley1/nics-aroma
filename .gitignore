@@ -17,8 +17,4 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# testing with jupyter notebooks
-notebooks/
-.ipynb_checkpoints/
-
 
