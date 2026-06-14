@@ -37,8 +37,13 @@ from aroma.constants import (
     DEFAULT_METHOD,
     DEFAULT_XY_DISTANCE,
 )
-from aroma.io import load_geometry
-from aroma.nics import NicsResult, XyNicsResult
+from aroma.io import load_geometry, log_has_bq_shielding, read_log_nics
+from aroma.nics import (
+    NicsResult,
+    XyNicsResult,
+    match_probe_ring,
+    nics_from_precomputed,
+)
 from aroma.parallel import parallel_map
 
 # ============================================================
@@ -47,6 +52,9 @@ from aroma.parallel import parallel_map
 
 # Degree of the NICS-vs-distance polynomial fit reported by the CLI.
 _FIT_DEGREE = 3
+
+# Warn when reused Bq probes sit this far (angstrom, RMS) off the ring axis.
+_OFFAXIS_WARN_A = 0.25
 
 # ============================================================
 # OUTPUT
@@ -116,8 +124,38 @@ def _load_backend(method: str, basis: str) -> Optional[ShieldingBackend]:
     return PyscfNmrBackend(method=method, basis=basis)
 
 
+def _is_reusable_log(path: Path) -> bool:
+    """True if the geometry is a Gaussian log that already holds Bq shielding."""
+    return path.suffix.lower() in (".log", ".out") and log_has_bq_shielding(path)
+
+
+def _run_scan_precomputed(args: argparse.Namespace) -> int:
+    """Report a NICS scan directly from Gaussian Bq shielding (no PySCF)."""
+    data = read_log_nics(args.geometry)
+    rings = select_rings(data.mol, args.ring, args.planar_only)
+    ring, off_axis = match_probe_ring(data.mol, rings, data.bq_coords)
+    print(
+        f"# {args.geometry.name}: reusing GIAO shielding from log "
+        f"({data.bq_coords.shape[0]} Bq probes, no recompute)",
+        flush=True,
+    )
+    if off_axis > _OFFAXIS_WARN_A:
+        print(
+            f"warning: Bq probes sit {off_axis:.2f} A (RMS) off the ring axis",
+            file=sys.stderr, flush=True,
+        )
+    result = nics_from_precomputed(
+        data.mol, ring, data.bq_coords, data.bq_tensors
+    )
+    _print_scan(ring, result, args.fit_start)
+    return 0
+
+
 def _run_scan(args: argparse.Namespace) -> int:
     """Execute the ``scan`` subcommand; return a process exit code."""
+    if _is_reusable_log(args.geometry):
+        return _run_scan_precomputed(args)
+
     backend = _load_backend(args.method, args.basis)
     if backend is None:
         return 2

@@ -23,9 +23,16 @@ from typing import Iterator, List, Tuple
 from aroma.backend.base import ShieldingBackend
 from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.constants import DEFAULT_BQ_RANGE, DEFAULT_BQ_STEP
-from aroma.io import load_geometry
+from aroma.io import load_geometry, log_has_bq_shielding, read_log_nics
 from aroma.molecule import Molecule
-from aroma.nics import NicsResult, XyNicsResult, run_nics_scan, run_xy_scan
+from aroma.nics import (
+    NicsResult,
+    XyNicsResult,
+    match_probe_ring,
+    nics_from_precomputed,
+    run_nics_scan,
+    run_xy_scan,
+)
 from aroma.parallel import parallel_map
 from aroma.rings import find_rings, is_planar, order_ring
 
@@ -136,9 +143,18 @@ def scan_paths(
     """
     assert paths, "no geometries to process"
     # Ring perception is cheap and stays in the parent; only the SCF-bound scans
-    # are dispatched to workers.
+    # are dispatched to workers. Logs that already carry Bq shielding are
+    # reported inline (no recompute) and skip the backend entirely.
     worklist: List[AxialJob] = []
     for path in paths:
+        if path.suffix.lower() in (".log", ".out") and log_has_bq_shielding(path):
+            data = read_log_nics(path)
+            rings = select_rings(data.mol, "auto", planar_only)
+            ring, _ = match_probe_ring(data.mol, rings, data.bq_coords)
+            yield path, ring, nics_from_precomputed(
+                data.mol, ring, data.bq_coords, data.bq_tensors
+            )
+            continue
         mol = load_geometry(path)
         for ring in select_rings(mol, "auto", planar_only):
             worklist.append((path, mol, ring, backend, start, stop, step))

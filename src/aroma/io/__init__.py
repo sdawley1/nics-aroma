@@ -21,7 +21,7 @@ from typing import Callable, Dict
 # ----- local modules -----
 from aroma.io.fchk import read_fchk
 from aroma.io.gaussian_com import read_com
-from aroma.io.gaussian_log import read_log
+from aroma.io.gaussian_log import log_has_bq_shielding, read_log, read_log_nics
 from aroma.io.xyz import read_xyz
 from aroma.molecule import Molecule
 
@@ -62,4 +62,12 @@ def load_geometry(path: Path) -> Molecule:
     return mol
 
 
-__all__ = ["load_geometry", "read_com", "read_log", "read_fchk", "read_xyz"]
+__all__ = [
+    "load_geometry",
+    "log_has_bq_shielding",
+    "read_com",
+    "read_fchk",
+    "read_log",
+    "read_log_nics",
+    "read_xyz",
+]

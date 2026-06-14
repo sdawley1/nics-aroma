@@ -27,6 +27,7 @@ import numpy.typing as npt
 # ----- local modules -----
 from aroma.backend.base import ShieldingBackend
 from aroma.constants import DEFAULT_BQ_RANGE, DEFAULT_BQ_STEP, DEFAULT_XY_DISTANCE
+from aroma.geometry import centroid
 from aroma.grid import axial_grid, xy_scan_grid
 from aroma.molecule import Molecule
 from aroma.reorient import reorient_ring_to_xy
@@ -206,4 +207,97 @@ def run_xy_scan(
         nics_zz=zz,
         nics_oop=oop,
         nics_inp=inp,
+    )
+
+
+# ============================================================
+# PRE-COMPUTED (GAUSSIAN) PATH
+# ============================================================
+
+
+def match_probe_ring(
+    mol: Molecule,
+    rings: List[List[int]],
+    bq_coords: npt.NDArray[np.float64],
+) -> Tuple[List[int], float]:
+    """Pick the ring whose normal axis the Bq probes lie on.
+
+    A hand-placed Bq grid belongs to a single ring. For each candidate the
+    probes are mapped into that ring's frame; the ring minimizing the probes'
+    root-mean-square in-plane (off-axis) offset is returned.
+
+    Parameters
+    ----------
+    mol : Molecule
+        Real-atom geometry the rings index into.
+    rings : list of ordered node lists
+        Candidate rings.
+    bq_coords : (M, 3) float array
+        Ghost probe coordinates.
+
+    Returns
+    -------
+    (ring, rms_offaxis) : tuple
+        The best-matching ring and its probes' RMS off-axis distance (angstrom).
+    """
+    assert rings, "no rings to match"
+    assert bq_coords.shape[0] >= 1, "need at least one probe"
+    best_ring = rings[0]
+    best_rms = float("inf")
+    for ring in rings:
+        center = centroid(mol.coords[ring])
+        _, rotation = reorient_ring_to_xy(mol, ring)
+        probes = (bq_coords - center) @ rotation.T
+        rms = float(np.sqrt(np.mean(probes[:, 0] ** 2 + probes[:, 1] ** 2)))
+        if rms < best_rms:
+            best_ring, best_rms = ring, rms
+    return best_ring, best_rms
+
+
+def nics_from_precomputed(
+    mol: Molecule,
+    ring: List[int],
+    bq_coords: npt.NDArray[np.float64],
+    bq_tensors: npt.NDArray[np.float64],
+) -> NicsResult:
+    """Build a NICS scan from pre-computed Gaussian Bq shielding tensors.
+
+    Reorients into the ring frame and rotates each shielding tensor with it
+    (sigma' = R sigma R^T), so the same decomposition used for freshly computed
+    tensors yields the NICS components. The probe height along the ring normal
+    becomes the scan distance.
+
+    Parameters
+    ----------
+    mol : Molecule
+        Real-atom geometry.
+    ring : list of int
+        Atom indices of the ring to probe (any order).
+    bq_coords : (M, 3) float array
+        Ghost probe coordinates, in the frame the tensors were reported in.
+    bq_tensors : (M, 3, 3) float array
+        GIAO shielding tensors (ppm) at the probes, same frame as ``bq_coords``.
+
+    Returns
+    -------
+    NicsResult
+        NICS components ordered by probe height above the ring centroid.
+    """
+    assert len(ring) >= 3, "a ring needs at least three atoms"
+    assert bq_coords.shape[0] == bq_tensors.shape[0], "probe/tensor count mismatch"
+    assert bq_coords.shape[0] >= 1, "need at least one probe"
+
+    center = centroid(mol.coords[ring])
+    _, rotation = reorient_ring_to_xy(mol, ring)
+    probes = (bq_coords - center) @ rotation.T
+    tensors = np.einsum("ij,njk,lk->nil", rotation, bq_tensors, rotation)
+
+    iso, zz, oop, inp = _decompose(tensors)
+    order = np.argsort(probes[:, 2])
+    return NicsResult(
+        distances=probes[order, 2].copy(),
+        nics_iso=iso[order],
+        nics_zz=zz[order],
+        nics_oop=oop[order],
+        nics_inp=inp[order],
     )
