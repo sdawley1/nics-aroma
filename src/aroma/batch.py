@@ -25,8 +25,18 @@ from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.constants import DEFAULT_BQ_RANGE, DEFAULT_BQ_STEP
 from aroma.io import load_geometry
 from aroma.molecule import Molecule
-from aroma.nics import NicsResult, run_nics_scan
+from aroma.nics import NicsResult, XyNicsResult, run_nics_scan, run_xy_scan
+from aroma.parallel import parallel_map
 from aroma.rings import find_rings, is_planar, order_ring
+
+# ============================================================
+# JOB TYPES
+# ============================================================
+
+# A unit of axial-scan work: (path, molecule, ring, backend, start, stop, step).
+AxialJob = Tuple[Path, Molecule, List[int], ShieldingBackend, float, float, float]
+# A unit of XY-scan work: (path, molecule, ring, backend, half_extent, step, height).
+XyJob = Tuple[Path, Molecule, List[int], ShieldingBackend, float, float, float]
 
 # ============================================================
 # RING SELECTION
@@ -67,6 +77,26 @@ def select_rings(
 
 
 # ============================================================
+# PARALLEL WORKERS
+# ============================================================
+#
+# These run in worker processes, so they must be importable module-level
+# functions (the spawn start method pickles them by qualified name).
+
+
+def _axial_job(job: AxialJob) -> Tuple[Path, List[int], NicsResult]:
+    """Run one axial NICS scan; return (path, ring, result)."""
+    path, mol, ring, backend, start, stop, step = job
+    return path, ring, run_nics_scan(mol, ring, backend, start, stop, step)
+
+
+def _xy_job(job: XyJob) -> Tuple[Path, List[int], XyNicsResult]:
+    """Run one in-plane (XY) NICS scan; return (path, ring, result)."""
+    path, mol, ring, backend, half_extent, step, height = job
+    return path, ring, run_xy_scan(mol, ring, backend, half_extent, step, height)
+
+
+# ============================================================
 # BATCH SCANNING
 # ============================================================
 
@@ -78,6 +108,8 @@ def scan_paths(
     stop: float = DEFAULT_BQ_RANGE[1],
     step: float = DEFAULT_BQ_STEP,
     planar_only: bool = False,
+    jobs: int = 1,
+    threads: int = 0,
 ) -> Iterator[Tuple[Path, List[int], NicsResult]]:
     """Yield (path, ring, result) for every perceived ring of every geometry.
 
@@ -91,6 +123,11 @@ def scan_paths(
         Axial scan grid parameters (angstrom).
     planar_only : bool
         Restrict each geometry's rings to the planar ones.
+    jobs : int
+        Worker processes for the independent scans (``<= 0`` = all cores;
+        ``1`` runs serially in-process).
+    threads : int
+        Per-worker PySCF/BLAS thread count (``<= 0`` auto-splits the cores).
 
     Yields
     ------
@@ -98,7 +135,11 @@ def scan_paths(
         One tuple per ring, in file then ring order.
     """
     assert paths, "no geometries to process"
+    # Ring perception is cheap and stays in the parent; only the SCF-bound scans
+    # are dispatched to workers.
+    worklist: List[AxialJob] = []
     for path in paths:
         mol = load_geometry(path)
         for ring in select_rings(mol, "auto", planar_only):
-            yield path, ring, run_nics_scan(mol, ring, backend, start, stop, step)
+            worklist.append((path, mol, ring, backend, start, stop, step))
+    yield from parallel_map(_axial_job, worklist, jobs=jobs, threads=threads)

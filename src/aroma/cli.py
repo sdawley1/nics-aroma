@@ -28,7 +28,7 @@ from typing import List, Optional
 # ----- local modules -----
 from aroma.analysis import fit_nics_curve
 from aroma.backend.base import ShieldingBackend
-from aroma.batch import scan_paths, select_rings
+from aroma.batch import _axial_job, _xy_job, scan_paths, select_rings
 from aroma.constants import (
     DEFAULT_BASIS,
     DEFAULT_BQ_RANGE,
@@ -38,7 +38,8 @@ from aroma.constants import (
     DEFAULT_XY_DISTANCE,
 )
 from aroma.io import load_geometry
-from aroma.nics import NicsResult, XyNicsResult, run_nics_scan, run_xy_scan
+from aroma.nics import NicsResult, XyNicsResult
+from aroma.parallel import parallel_map
 
 # ============================================================
 # CONSTANTS
@@ -129,8 +130,12 @@ def _run_scan(args: argparse.Namespace) -> int:
         f"{args.method}/{args.basis}",
         flush=True,
     )
-    for ring in rings:
-        result = run_nics_scan(mol, ring, backend, start, stop, args.step)
+    worklist = [
+        (args.geometry, mol, ring, backend, start, stop, args.step) for ring in rings
+    ]
+    for _path, ring, result in parallel_map(
+        _axial_job, worklist, jobs=args.jobs, threads=args.threads
+    ):
         _print_scan(ring, result, args.fit_start)
     return 0
 
@@ -149,10 +154,13 @@ def _run_xyscan(args: argparse.Namespace) -> int:
         f"at z={args.height} A",
         flush=True,
     )
-    for ring in rings:
-        result = run_xy_scan(
-            mol, ring, backend, args.half_extent, args.step, args.height
-        )
+    worklist = [
+        (args.geometry, mol, ring, backend, args.half_extent, args.step, args.height)
+        for ring in rings
+    ]
+    for _path, ring, result in parallel_map(
+        _xy_job, worklist, jobs=args.jobs, threads=args.threads
+    ):
         _print_xy_scan(ring, result)
     return 0
 
@@ -167,7 +175,8 @@ def _run_batch(args: argparse.Namespace) -> int:
     print(f"# batch: {len(args.geometries)} file(s), {args.method}/{args.basis}",
           flush=True)
     for path, ring, result in scan_paths(
-        args.geometries, backend, start, stop, args.step, args.planar_only
+        args.geometries, backend, start, stop, args.step, args.planar_only,
+        args.jobs, args.threads,
     ):
         print(f"\n## {path.name}", flush=True)
         _print_scan(ring, result, args.fit_start)
@@ -188,6 +197,15 @@ def _add_selection_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--planar-only", action="store_true",
         help="keep only planar rings when perceiving rings automatically",
+    )
+    # ----- parallelism -----
+    p.add_argument(
+        "--jobs", type=int, default=1,
+        help="worker processes for independent scans (0 = all cores)",
+    )
+    p.add_argument(
+        "--threads", type=int, default=0,
+        help="PySCF threads per worker (0 = auto-split across cores)",
     )
 
 

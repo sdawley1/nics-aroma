@@ -40,7 +40,19 @@ aroma xyscan benzene.com --half-extent 2.0 --step 0.5 --height 1.7
 
 # Scan several geometries in one process.
 aroma batch a.com b.com c.log --method hf --basis sto-3g
+
+# Run independent scans in parallel across 4 worker processes.
+aroma batch *.log --jobs 4
 ```
+
+### Parallelism
+
+Independent `(geometry, ring)` scans are embarrassingly parallel — each is a
+self-contained SCF. Pass `--jobs N` (on `scan`, `batch`, or `xyscan`) to run them
+across `N` worker processes; `--jobs 0` uses every core. Each worker's PySCF
+thread count is auto-split as `cores // jobs` to avoid oversubscription, with
+`--threads M` to override. This is portable single-node multiprocessing (no
+cluster scheduler required). The default `--jobs 1` runs serially in-process.
 
 Accepted geometry formats: Gaussian input (`.com`/`.gjf`/`.in`), Gaussian output
 (`.log`/`.out`), formatted checkpoint (`.fchk`), and XYZ (`.xyz`).

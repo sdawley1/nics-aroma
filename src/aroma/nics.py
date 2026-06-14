@@ -72,24 +72,6 @@ class XyNicsResult:
 # ============================================================
 
 
-def _principal_components(
-    tensor: npt.NDArray[np.float64],
-) -> Tuple[float, float, float, float]:
-    """Decompose one shielding tensor into (iso, zz, out-of-plane, in-plane).
-
-    The out-of-plane principal value is the eigenvalue whose eigenvector aligns
-    best with +z (the ring normal); the remaining two are averaged in-plane.
-    """
-    sym = 0.5 * (tensor + tensor.T)
-    iso = float(np.trace(sym)) / 3.0
-    zz = float(sym[2, 2])
-    eigvals, eigvecs = np.linalg.eigh(sym)
-    oop_idx = int(np.argmax(np.abs(eigvecs[2, :])))
-    oop = float(eigvals[oop_idx])
-    in_plane = [float(eigvals[i]) for i in range(3) if i != oop_idx]
-    return iso, zz, oop, sum(in_plane) / 2.0
-
-
 def _decompose(
     tensors: npt.NDArray[np.float64],
 ) -> Tuple[
@@ -99,6 +81,11 @@ def _decompose(
     npt.NDArray[np.float64],
 ]:
     """Decompose a stack of shielding tensors into NICS component arrays.
+
+    All probes are processed at once: ``np.linalg.eigh`` is batched over the
+    leading axis, so there is no Python per-probe loop. For each tensor the
+    out-of-plane principal value is the eigenvalue whose eigenvector aligns best
+    with +z (the ring normal); the other two eigenvalues are averaged in-plane.
 
     Parameters
     ----------
@@ -112,12 +99,16 @@ def _decompose(
     """
     assert tensors.ndim == 3 and tensors.shape[1:] == (3, 3), "tensors must be (M,3,3)"
     n = tensors.shape[0]
-    iso = np.empty(n, dtype=np.float64)
-    zz = np.empty(n, dtype=np.float64)
-    oop = np.empty(n, dtype=np.float64)
-    inp = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        iso[i], zz[i], oop[i], inp[i] = _principal_components(tensors[i])
+    sym = 0.5 * (tensors + tensors.transpose(0, 2, 1))
+    iso = np.trace(sym, axis1=1, axis2=2) / 3.0
+    zz = sym[:, 2, 2]
+
+    eigvals, eigvecs = np.linalg.eigh(sym)  # eigvals (M,3) asc; eigvecs columns
+    # z-component of each eigenvector: pick the one most aligned with +z.
+    oop_idx = np.argmax(np.abs(eigvecs[:, 2, :]), axis=1)
+    oop = eigvals[np.arange(n), oop_idx]
+    inp = (eigvals.sum(axis=1) - oop) / 2.0
+
     # NICS is the negative of the shielding.
     return -iso, -zz, -oop, -inp
 

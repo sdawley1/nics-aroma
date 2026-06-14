@@ -64,3 +64,23 @@ def test_select_rings_planar_only(data_dir: Path) -> None:
     rings = select_rings(mol, "auto", planar_only=True)
     assert len(rings) == 3
     assert all(is_planar(mol.coords, ring) for ring in rings)
+
+
+def test_scan_paths_parallel_matches_serial(data_dir: Path) -> None:
+    """Parallel batch (jobs=2) reproduces the serial results and their order."""
+    paths = [
+        data_dir / "benzene/benzene.in",      # 1 ring
+        data_dir / "phenalene/phenalene.in",  # 3 rings
+    ]
+    serial = list(scan_paths(paths, _UnitBackend(), start=0.0, stop=1.0, step=0.5))
+    parallel = list(
+        scan_paths(paths, _UnitBackend(), start=0.0, stop=1.0, step=0.5, jobs=2)
+    )
+
+    assert [(p.name, ring) for p, ring, _ in parallel] == [
+        (p.name, ring) for p, ring, _ in serial
+    ]
+    for (_, _, s), (_, _, par) in zip(serial, parallel):
+        assert np.allclose(s.distances, par.distances)
+        assert np.allclose(s.nics_iso, par.nics_iso)
+        assert np.allclose(s.nics_zz, par.nics_zz)
