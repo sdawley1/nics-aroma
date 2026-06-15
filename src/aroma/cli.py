@@ -21,21 +21,29 @@ Sam Dawley
 
 # ----- standard library -----
 import argparse
+import contextlib
+import io
 import sys
+from itertools import groupby
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
+
+# ----- numerics -----
+import numpy as np
 
 # ----- local modules -----
 from aroma.analysis import fit_nics_curve
 from aroma.backend.base import ShieldingBackend
-from aroma.batch import _axial_job, _xy_job, scan_paths, select_rings
+from aroma.batch import _axial_job, _som_job, _xy_job, scan_paths, select_rings
 from aroma.constants import (
     DEFAULT_BASIS,
     DEFAULT_BQ_RANGE,
     DEFAULT_BQ_STEP,
     DEFAULT_FIT_START,
     DEFAULT_METHOD,
+    DEFAULT_SOM_H_DISTANCE,
     DEFAULT_XY_DISTANCE,
+    SOM_DEVIATION_WARN,
 )
 from aroma.io import load_geometry, log_has_bq_shielding, read_log_nics
 from aroma.nics import (
@@ -45,6 +53,7 @@ from aroma.nics import (
     nics_from_precomputed,
 )
 from aroma.parallel import parallel_map
+from aroma.sigma_only import SigmaOnlyResult, fit_pi_zz
 
 # ============================================================
 # CONSTANTS
@@ -55,6 +64,44 @@ _FIT_DEGREE = 3
 
 # Warn when reused Bq probes sit this far (angstrom, RMS) off the ring axis.
 _OFFAXIS_WARN_A = 0.25
+
+# ============================================================
+# OUTPUT FILES
+# ============================================================
+#
+# Minimal result-file writing: each scan's console output is also saved beside
+# its input geometry so the values are easy to look up later. (Marked minimal;
+# intended to be hardened separately.)
+
+
+def _result_path(geometry: Path, pi_zz: str) -> Path:
+    """Result-file path beside the input geometry.
+
+    Sigma-only runs write ``<stem>.pizz.txt`` and ordinary scans
+    ``<stem>.nics.txt``, so the two never overwrite one another.
+    """
+    suffix = ".pizz.txt" if pi_zz == "som" else ".nics.txt"
+    return geometry.parent / (geometry.stem + suffix)
+
+
+@contextlib.contextmanager
+def _capture_to(path: Path) -> Iterator[None]:
+    """Tee everything printed in the block to stdout and to ``path``.
+
+    stdout is captured for the block's duration, then the captured text is both
+    echoed to the real stdout and written to ``path`` (overwriting it). Messages
+    sent explicitly to stderr (e.g. warnings) are unaffected and stay on the
+    console only.
+    """
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        yield
+    text = buffer.getvalue()
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    path.write_text(text, encoding="utf-8")
+    print(f"# wrote {path}", flush=True)
+
 
 # ============================================================
 # OUTPUT
@@ -105,6 +152,52 @@ def _print_xy_scan(ring: List[int], result: XyNicsResult) -> None:
         )
 
 
+def _print_som_scan(
+    ring: List[int], result: SigmaOnlyResult, fit_start: float
+) -> None:
+    """Print one ring's sigma-only NICS_pizz table and fitted NICS_pizz(1)."""
+    one_based = ",".join(str(a + 1) for a in ring)
+    print(f"\n# Ring atoms (1-based): {one_based}", flush=True)
+    print(
+        f"# {'dist':>6} {'pi_zz':>10} {'zz_del':>10} {'zz_mod':>10} "
+        f"{'3*d_iso':>10} {'dev':>8}",
+        flush=True,
+    )
+    for d, pz, zr, zm, t3, dev in zip(
+        result.distances, result.nics_pi_zz, result.nics_zz_real,
+        result.nics_zz_model, result.three_delta_iso, result.som_deviation,
+    ):
+        print(
+            f"  {d:6.2f} {pz:10.3f} {zr:10.3f} {zm:10.3f} {t3:10.3f} {dev:8.3f}",
+            flush=True,
+        )
+
+    if int((result.distances >= fit_start).sum()) <= _FIT_DEGREE:
+        print(
+            f"# (skipping fit: need > {_FIT_DEGREE} probes beyond {fit_start} A)",
+            flush=True,
+        )
+        return
+    pi_one = fit_pi_zz(result, dist_start=fit_start, deg=_FIT_DEGREE)
+    # The model's NICS_zz ~ 3*dNICS_iso identity only holds away from the ring;
+    # the near-region (r < fit_start) is contaminated and excluded, so judge the
+    # model quality over the same range used for the fit.
+    fit_mask = result.distances >= fit_start
+    max_dev = float(np.max(np.abs(result.som_deviation[fit_mask])))
+    print(
+        f"# Fitted NICS_pizz(1): {pi_one:.3f}  "
+        f"(SOM check: max|NICS_zz - 3*dNICS_iso| beyond {fit_start} A = "
+        f"{max_dev:.3f} ppm)",
+        flush=True,
+    )
+    if max_dev > SOM_DEVIATION_WARN:
+        print(
+            f"warning: sigma-only model deviation {max_dev:.2f} ppm exceeds "
+            f"{SOM_DEVIATION_WARN} ppm; the model may be inaccurate",
+            file=sys.stderr, flush=True,
+        )
+
+
 # ============================================================
 # SCAN COMMAND
 # ============================================================
@@ -134,11 +227,6 @@ def _run_scan_precomputed(args: argparse.Namespace) -> int:
     data = read_log_nics(args.geometry)
     rings = select_rings(data.mol, args.ring, args.planar_only)
     ring, off_axis = match_probe_ring(data.mol, rings, data.bq_coords)
-    print(
-        f"# {args.geometry.name}: reusing GIAO shielding from log "
-        f"({data.bq_coords.shape[0]} Bq probes, no recompute)",
-        flush=True,
-    )
     if off_axis > _OFFAXIS_WARN_A:
         print(
             f"warning: Bq probes sit {off_axis:.2f} A (RMS) off the ring axis",
@@ -147,12 +235,20 @@ def _run_scan_precomputed(args: argparse.Namespace) -> int:
     result = nics_from_precomputed(
         data.mol, ring, data.bq_coords, data.bq_tensors
     )
-    _print_scan(ring, result, args.fit_start)
+    with _capture_to(_result_path(args.geometry, args.pi_zz)):
+        print(
+            f"# {args.geometry.name}: reusing GIAO shielding from log "
+            f"({data.bq_coords.shape[0]} Bq probes, no recompute)",
+            flush=True,
+        )
+        _print_scan(ring, result, args.fit_start)
     return 0
 
 
 def _run_scan(args: argparse.Namespace) -> int:
     """Execute the ``scan`` subcommand; return a process exit code."""
+    if args.pi_zz == "som":
+        return _run_scan_som(args)
     if _is_reusable_log(args.geometry):
         return _run_scan_precomputed(args)
 
@@ -163,18 +259,53 @@ def _run_scan(args: argparse.Namespace) -> int:
     mol = load_geometry(args.geometry)
     rings = select_rings(mol, args.ring, args.planar_only)
     start, stop = args.range
-    print(
-        f"# {args.geometry.name}: {len(rings)} ring(s), "
-        f"{args.method}/{args.basis}",
-        flush=True,
-    )
     worklist = [
         (args.geometry, mol, ring, backend, start, stop, args.step) for ring in rings
     ]
-    for _path, ring, result in parallel_map(
-        _axial_job, worklist, jobs=args.jobs, threads=args.threads
-    ):
-        _print_scan(ring, result, args.fit_start)
+    results = parallel_map(_axial_job, worklist, jobs=args.jobs, threads=args.threads)
+    with _capture_to(_result_path(args.geometry, args.pi_zz)):
+        print(
+            f"# {args.geometry.name}: {len(rings)} ring(s), "
+            f"{args.method}/{args.basis}",
+            flush=True,
+        )
+        for _path, ring, result in results:
+            _print_scan(ring, result, args.fit_start)
+    return 0
+
+
+def _run_scan_som(args: argparse.Namespace) -> int:
+    """Execute ``scan --pi-zz som`` (sigma-only NICS_pizz); return exit code.
+
+    The model needs a live SCF, so the precomputed-Gaussian-log fast path cannot
+    be used here.
+    """
+    backend = _load_backend(args.method, args.basis)
+    if backend is None:
+        return 2
+    if _is_reusable_log(args.geometry):
+        print(
+            "# note: --pi-zz som needs a live SCF; ignoring precomputed Bq "
+            "shielding in the log",
+            flush=True,
+        )
+
+    mol = load_geometry(args.geometry)
+    rings = select_rings(mol, args.ring, args.planar_only)
+    start, stop = args.range
+    worklist = [
+        (args.geometry, mol, ring, backend, start, stop, args.step, args.som_h_distance)
+        for ring in rings
+    ]
+    results = parallel_map(_som_job, worklist, jobs=args.jobs, threads=args.threads)
+    with _capture_to(_result_path(args.geometry, args.pi_zz)):
+        print(
+            f"# {args.geometry.name}: {len(rings)} ring(s), sigma-only NICS_pizz, "
+            f"{args.method}/{args.basis}",
+            flush=True,
+        )
+        for _path, ring, result in results:
+            _print_som_scan(ring, result, args.fit_start)
     return 0
 
 
@@ -209,15 +340,49 @@ def _run_batch(args: argparse.Namespace) -> int:
     if backend is None:
         return 2
 
+    if args.pi_zz == "som":
+        return _run_batch_som(args, backend)
+
     start, stop = args.range
     print(f"# batch: {len(args.geometries)} file(s), {args.method}/{args.basis}",
           flush=True)
-    for path, ring, result in scan_paths(
+    results = list(scan_paths(
         args.geometries, backend, start, stop, args.step, args.planar_only,
         args.jobs, args.threads,
-    ):
-        print(f"\n## {path.name}", flush=True)
-        _print_scan(ring, result, args.fit_start)
+    ))
+    meta = f"{args.method}/{args.basis}"
+    for path, group in groupby(results, key=lambda item: item[0]):
+        with _capture_to(_result_path(path, args.pi_zz)):
+            print(f"\n## {path.name}  ({meta})", flush=True)
+            for _path, ring, result in group:
+                _print_scan(ring, result, args.fit_start)
+    return 0
+
+
+def _run_batch_som(args: argparse.Namespace, backend: ShieldingBackend) -> int:
+    """Execute ``batch --pi-zz som`` over several geometries; return exit code."""
+    start, stop = args.range
+    print(
+        f"# batch: {len(args.geometries)} file(s), sigma-only NICS_pizz, "
+        f"{args.method}/{args.basis}",
+        flush=True,
+    )
+    worklist = []
+    for path in args.geometries:
+        mol = load_geometry(path)
+        for ring in select_rings(mol, "auto", args.planar_only):
+            worklist.append(
+                (path, mol, ring, backend, start, stop, args.step, args.som_h_distance)
+            )
+    results = list(
+        parallel_map(_som_job, worklist, jobs=args.jobs, threads=args.threads)
+    )
+    meta = f"{args.method}/{args.basis}, sigma-only NICS_pizz"
+    for path, group in groupby(results, key=lambda item: item[0]):
+        with _capture_to(_result_path(path, args.pi_zz)):
+            print(f"\n## {path.name}  ({meta})", flush=True)
+            for _path, ring, result in group:
+                _print_som_scan(ring, result, args.fit_start)
     return 0
 
 
@@ -262,6 +427,15 @@ def _add_common_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--fit-start", type=float, default=DEFAULT_FIT_START,
         help="fit probes at/beyond this distance (angstrom)",
+    )
+    # ----- pi dissection -----
+    p.add_argument(
+        "--pi-zz", choices=["none", "som"], default="none",
+        help="dissect the pi contribution to NICS_zz; 'som' = sigma-only model",
+    )
+    p.add_argument(
+        "--som-h-distance", type=float, default=DEFAULT_SOM_H_DISTANCE,
+        help="sigma-only model: perpendicular C-H placement distance (angstrom)",
     )
 
 

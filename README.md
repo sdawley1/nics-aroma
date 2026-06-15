@@ -35,6 +35,9 @@ aroma scan indene.xyz --ring 1,2,3,4,5
 # Keep only planar (aromatic-like) rings when perceiving automatically.
 aroma scan phenalene.com --planar-only
 
+# Dissect the pi contribution to NICS_zz (NICS_pizz) with the sigma-only model.
+aroma scan benzene.com --pi-zz som --method b3lyp --basis 6-311+g*
+
 # In-plane (XY) NICS map on a plane above the ring.
 aroma xyscan benzene.com --half-extent 2.0 --step 0.5 --height 1.7
 

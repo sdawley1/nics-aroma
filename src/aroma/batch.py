@@ -35,6 +35,7 @@ from aroma.nics import (
 )
 from aroma.parallel import parallel_map
 from aroma.rings import find_rings, is_planar, order_ring
+from aroma.sigma_only import SigmaOnlyResult, run_sigma_only_scan
 
 # ============================================================
 # JOB TYPES
@@ -44,6 +45,11 @@ from aroma.rings import find_rings, is_planar, order_ring
 AxialJob = Tuple[Path, Molecule, List[int], ShieldingBackend, float, float, float]
 # A unit of XY-scan work: (path, molecule, ring, backend, half_extent, step, height).
 XyJob = Tuple[Path, Molecule, List[int], ShieldingBackend, float, float, float]
+# A unit of sigma-only NICS_pizz work:
+# (path, molecule, ring, backend, start, stop, step, h_distance).
+SomJob = Tuple[
+    Path, Molecule, List[int], ShieldingBackend, float, float, float, float
+]
 
 # ============================================================
 # RING SELECTION
@@ -101,6 +107,14 @@ def _xy_job(job: XyJob) -> Tuple[Path, List[int], XyNicsResult]:
     """Run one in-plane (XY) NICS scan; return (path, ring, result)."""
     path, mol, ring, backend, half_extent, step, height = job
     return path, ring, run_xy_scan(mol, ring, backend, half_extent, step, height)
+
+
+def _som_job(job: SomJob) -> Tuple[Path, List[int], SigmaOnlyResult]:
+    """Run one sigma-only NICS_pizz scan; return (path, ring, result)."""
+    path, mol, ring, backend, start, stop, step, h_distance = job
+    return path, ring, run_sigma_only_scan(
+        mol, ring, backend, None, start, stop, step, h_distance
+    )
 
 
 # ============================================================

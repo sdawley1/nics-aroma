@@ -54,3 +54,17 @@ DEFAULT_FIT_START = 1.1
 DEFAULT_METHOD = "b3lyp"
 DEFAULT_BASIS = "6-311+g*"
 DEFAULT_XC_GRID = "ultrafine"
+
+# ============================================================
+# SIGMA-ONLY MODEL DEFAULTS
+# ============================================================
+
+# Distance (angstrom) at which a localizing H is placed below each pi-center
+# when building the sigma-only model. The review chapter (Gershoni-Poranne &
+# Stanger) states "approximately 1 angstrom".
+# TODO: confirm the exact value against Stanger, J. Org. Chem. 2010, 75, 2281.
+DEFAULT_SOM_H_DISTANCE = 1.0
+
+# Warn when the sigma-only model's built-in check |NICS_zz - 3*dNICS_iso|
+# exceeds this many ppm, indicating a poor (inaccurate) model.
+SOM_DEVIATION_WARN = 2.0
