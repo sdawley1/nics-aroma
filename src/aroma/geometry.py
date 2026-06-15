@@ -72,6 +72,22 @@ def ring_normal(
     return np.asarray(normal / norm, dtype=np.float64)
 
 
+def plane_normal(points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Unit normal of the best-fit plane through an (N, 3) point set (N >= 3).
+
+    The normal is the least-significant right-singular vector of the
+    mean-centered points (the total-least-squares plane fit).
+    """
+    assert points.ndim == 2 and points.shape[1] == 3, "points must be (N, 3)"
+    assert points.shape[0] >= 3, "need at least three points to fit a plane"
+    centered = points - points.mean(axis=0)
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    normal = vh[-1]
+    norm = float(np.linalg.norm(normal))
+    assert norm > _EPS, "degenerate plane"
+    return np.asarray(normal / norm, dtype=np.float64)
+
+
 def rodrigues_matrix(
     axis: npt.NDArray[np.float64], angle: float
 ) -> npt.NDArray[np.float64]:

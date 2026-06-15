@@ -45,10 +45,19 @@ from aroma.constants import (
     DEFAULT_FIT_START,
     DEFAULT_SOM_H_DISTANCE,
 )
+from aroma.geometry import centroid, plane_normal
 from aroma.grid import axial_grid
 from aroma.molecule import Molecule
 from aroma.reorient import reorient_ring_to_xy
 from aroma.rings import find_rings
+
+# ============================================================
+# CONSTANTS
+# ============================================================
+
+# Max atom deviation (angstrom) from the best-fit plane for the molecule-level
+# scan, whose shared molecular normal and one-face model assume a planar system.
+_PLANARITY_TOL_A = 0.3
 
 # ============================================================
 # RESULT CONTAINER
@@ -154,6 +163,41 @@ def sigma_only_model(
     return Molecule(numbers=numbers, coords=coords, charge=charge, mult=1)
 
 
+def sigma_only_model_global(
+    mol: Molecule,
+    pi_centers: List[int],
+    normal: npt.NDArray[np.float64],
+    h_distance: float = DEFAULT_SOM_H_DISTANCE,
+) -> Molecule:
+    """Build the sigma-only model in the molecule's own frame.
+
+    Like :func:`sigma_only_model`, but places each localizing H along ``-normal``
+    (the molecular plane normal) rather than ``-z``, so one model serves every
+    ring of a molecule-level scan. The probes sit on the ``+normal`` face.
+
+    Parameters
+    ----------
+    mol : Molecule
+        Real-atom geometry (unreoriented).
+    pi_centers : list of int
+        Indices of the carbons to saturate.
+    normal : (3,) float array
+        Unit molecular-plane normal; H's go on the ``-normal`` face.
+    h_distance : float
+        Perpendicular C-H placement distance (angstrom).
+    """
+    assert bool(mol.real_mask().all()), "model must contain only real atoms"
+    assert len(pi_centers) >= 1, "need at least one pi-center"
+    assert h_distance > 0.0, "H placement distance must be positive"
+    assert normal.shape == (3,), "normal must be a 3-vector"
+
+    h_coords = mol.coords[pi_centers] - h_distance * normal
+    numbers = np.concatenate([mol.numbers, np.ones(len(pi_centers), dtype=np.int_)])
+    coords = np.vstack([mol.coords, h_coords])
+    charge = mol.charge + (len(pi_centers) % 2)
+    return Molecule(numbers=numbers, coords=coords, charge=charge, mult=1)
+
+
 # ============================================================
 # COMPONENT EXTRACTION
 # ============================================================
@@ -172,6 +216,23 @@ def _iso_zz(
     sym = 0.5 * (tensors + tensors.transpose(0, 2, 1))
     iso = -np.trace(sym, axis1=1, axis2=2) / 3.0
     zz = -sym[:, 2, 2]
+    return iso, zz
+
+
+def _iso_zz_along(
+    tensors: npt.NDArray[np.float64], normal: npt.NDArray[np.float64]
+) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Isotropic and out-of-plane NICS for tensors in an arbitrary frame.
+
+    Like :func:`_iso_zz`, but the out-of-plane component is taken along ``normal``
+    (``zz = -n . sigma . n``) instead of the +z axis, so the molecule-level scan
+    can keep tensors in the input frame and avoid a per-ring reorientation.
+    """
+    assert tensors.ndim == 3 and tensors.shape[1:] == (3, 3), "tensors must be (M,3,3)"
+    assert normal.shape == (3,), "normal must be a 3-vector"
+    sym = 0.5 * (tensors + tensors.transpose(0, 2, 1))
+    iso = -np.trace(sym, axis1=1, axis2=2) / 3.0
+    zz = -np.einsum("i,nij,j->n", normal, sym, normal)
     return iso, zz
 
 
@@ -243,6 +304,90 @@ def run_sigma_only_scan(
         som_deviation=nics_pi_zz - three_delta_iso,
         pi_centers=tuple(centers),
     )
+
+
+# ============================================================
+# MOLECULE-LEVEL SCAN (one real + one model SCF for all rings)
+# ============================================================
+
+
+def run_sigma_only_molecule(
+    mol: Molecule,
+    rings: List[List[int]],
+    backend: ShieldingBackend,
+    pi_centers: Optional[List[int]] = None,
+    start: float = DEFAULT_BQ_RANGE[0],
+    stop: float = DEFAULT_BQ_RANGE[1],
+    step: float = DEFAULT_BQ_STEP,
+    h_distance: float = DEFAULT_SOM_H_DISTANCE,
+) -> List[Tuple[List[int], SigmaOnlyResult]]:
+    """Sigma-only NICS_pizz for every ring of a molecule in two SCFs total.
+
+    The real-molecule and sigma-only-model GIAO shieldings do not depend on which
+    ring is probed, so they are each computed once, with the axial probes of all
+    rings stacked into a single ghost set. The out-of-plane component is read
+    along the shared molecular normal, avoiding any per-ring reorientation. This
+    replaces the per-ring driver's ``2 * len(rings)`` SCFs with exactly two.
+
+    Parameters
+    ----------
+    mol : Molecule
+        Input geometry (planar pi-system assumed).
+    rings : list of list of int
+        Atom indices of each ring to probe.
+    backend : ShieldingBackend
+        Provider of GIAO shielding tensors.
+    pi_centers : list of int, optional
+        Carbons to saturate; defaults to the whole conjugated pi-system.
+    start, stop, step : float
+        Axial grid extent and spacing (angstrom).
+    h_distance : float
+        Perpendicular C-H placement distance for the model (angstrom).
+
+    Returns
+    -------
+    list of (ring, SigmaOnlyResult)
+        One result per input ring, in ``rings`` order.
+    """
+    assert rings, "need at least one ring"
+    normal = plane_normal(mol.coords)
+    out_of_plane = np.abs((mol.coords - mol.coords.mean(axis=0)) @ normal)
+    assert float(out_of_plane.max()) < _PLANARITY_TOL_A, (
+        "molecule-level sigma-only scan assumes a planar pi-system; "
+        f"max out-of-plane deviation is {float(out_of_plane.max()):.2f} A"
+    )
+
+    centers = list(pi_centers) if pi_centers is not None else perceive_pi_centers(mol)
+    distances = axial_grid(start, stop, step)[:, 2]
+    n_probe = distances.size
+
+    # Stack every ring's axial probes (centroid + d * normal) into one ghost set.
+    blocks = [
+        centroid(mol.coords[ring]) + np.outer(distances, normal) for ring in rings
+    ]
+    probes = np.vstack(blocks)
+
+    model = sigma_only_model_global(mol, centers, normal, h_distance)
+    iso_real, zz_real = _iso_zz_along(backend.shielding(mol, probes), normal)
+    iso_model, zz_model = _iso_zz_along(backend.shielding(model, probes), normal)
+
+    results: List[Tuple[List[int], SigmaOnlyResult]] = []
+    for i, ring in enumerate(rings):
+        sl = slice(i * n_probe, (i + 1) * n_probe)
+        pi_zz = zz_real[sl] - zz_model[sl]
+        three_delta_iso = 3.0 * (iso_real[sl] - iso_model[sl])
+        results.append((ring, SigmaOnlyResult(
+            distances=distances.copy(),
+            nics_pi_zz=pi_zz,
+            nics_zz_real=zz_real[sl],
+            nics_zz_model=zz_model[sl],
+            nics_iso_real=iso_real[sl],
+            nics_iso_model=iso_model[sl],
+            three_delta_iso=three_delta_iso,
+            som_deviation=pi_zz - three_delta_iso,
+            pi_centers=tuple(centers),
+        )))
+    return results
 
 
 # ============================================================

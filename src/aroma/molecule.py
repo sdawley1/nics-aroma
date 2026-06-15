@@ -70,3 +70,10 @@ class Molecule:
     def symbols(self) -> List[str]:
         """Element symbols for every atom, in order."""
         return [number_to_symbol(int(z)) for z in self.numbers]
+
+    def to_xyz(self) -> str:
+        """Return the geometry as an XYZ-format string."""
+        lines = [str(self.n_atoms), ""]
+        for sym, (x, y, z) in zip(self.symbols(), self.coords):
+            lines.append(f"{sym:<4s} {x:12.6f} {y:12.6f} {z:12.6f}")
+        return "\n".join(lines)

@@ -34,7 +34,13 @@ import numpy as np
 # ----- local modules -----
 from aroma.analysis import fit_nics_curve
 from aroma.backend.base import ShieldingBackend
-from aroma.batch import _axial_job, _som_job, _xy_job, scan_paths, select_rings
+from aroma.batch import (
+    _axial_job,
+    _som_molecule_job,
+    _xy_job,
+    scan_paths,
+    select_rings,
+)
 from aroma.constants import (
     DEFAULT_BASIS,
     DEFAULT_BQ_RANGE,
@@ -53,7 +59,7 @@ from aroma.nics import (
     nics_from_precomputed,
 )
 from aroma.parallel import parallel_map
-from aroma.sigma_only import SigmaOnlyResult, fit_pi_zz
+from aroma.sigma_only import SigmaOnlyResult, fit_pi_zz, run_sigma_only_molecule
 
 # ============================================================
 # CONSTANTS
@@ -293,18 +299,16 @@ def _run_scan_som(args: argparse.Namespace) -> int:
     mol = load_geometry(args.geometry)
     rings = select_rings(mol, args.ring, args.planar_only)
     start, stop = args.range
-    worklist = [
-        (args.geometry, mol, ring, backend, start, stop, args.step, args.som_h_distance)
-        for ring in rings
-    ]
-    results = parallel_map(_som_job, worklist, jobs=args.jobs, threads=args.threads)
+    ring_results = run_sigma_only_molecule(
+        mol, rings, backend, None, start, stop, args.step, args.som_h_distance
+    )
     with _capture_to(_result_path(args.geometry, args.pi_zz)):
         print(
             f"# {args.geometry.name}: {len(rings)} ring(s), sigma-only NICS_pizz, "
             f"{args.method}/{args.basis}",
             flush=True,
         )
-        for _path, ring, result in results:
+        for ring, result in ring_results:
             _print_som_scan(ring, result, args.fit_start)
     return 0
 
@@ -360,7 +364,11 @@ def _run_batch(args: argparse.Namespace) -> int:
 
 
 def _run_batch_som(args: argparse.Namespace, backend: ShieldingBackend) -> int:
-    """Execute ``batch --pi-zz som`` over several geometries; return exit code."""
+    """Execute ``batch --pi-zz som`` over several geometries; return exit code.
+
+    Each molecule is one job (two SCFs), so ``--jobs`` parallelizes across
+    molecules.
+    """
     start, stop = args.range
     print(
         f"# batch: {len(args.geometries)} file(s), sigma-only NICS_pizz, "
@@ -370,18 +378,18 @@ def _run_batch_som(args: argparse.Namespace, backend: ShieldingBackend) -> int:
     worklist = []
     for path in args.geometries:
         mol = load_geometry(path)
-        for ring in select_rings(mol, "auto", args.planar_only):
-            worklist.append(
-                (path, mol, ring, backend, start, stop, args.step, args.som_h_distance)
-            )
-    results = list(
-        parallel_map(_som_job, worklist, jobs=args.jobs, threads=args.threads)
+        rings = select_rings(mol, "auto", args.planar_only)
+        worklist.append(
+            (path, mol, rings, backend, start, stop, args.step, args.som_h_distance)
+        )
+    results = parallel_map(
+        _som_molecule_job, worklist, jobs=args.jobs, threads=args.threads
     )
     meta = f"{args.method}/{args.basis}, sigma-only NICS_pizz"
-    for path, group in groupby(results, key=lambda item: item[0]):
+    for path, ring_results in results:
         with _capture_to(_result_path(path, args.pi_zz)):
             print(f"\n## {path.name}  ({meta})", flush=True)
-            for _path, ring, result in group:
+            for ring, result in ring_results:
                 _print_som_scan(ring, result, args.fit_start)
     return 0
 

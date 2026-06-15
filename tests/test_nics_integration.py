@@ -19,11 +19,12 @@ import numpy as np
 import pytest
 
 # ----- local modules -----
+from aroma.batch import select_rings
 from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.io import load_geometry
 from aroma.nics import run_nics_scan
 from aroma.rings import find_rings
-from aroma.sigma_only import run_sigma_only_scan
+from aroma.sigma_only import run_sigma_only_molecule, run_sigma_only_scan
 
 pyscf = pytest.importorskip("pyscf", reason="pyscf extra not installed")
 pytest.importorskip("pyscf.prop.nmr", reason="pyscf properties extension not installed")
@@ -81,3 +82,34 @@ def test_benzene_sigma_only_pizz(data_dir: Path) -> None:
     deviation_1 = float(result.som_deviation[-1])
     assert pi_zz_1 < -8.0, f"NICS_pizz(1)={pi_zz_1:.3f} (expected strongly diatropic)"
     assert abs(deviation_1) < 5.0, f"SOM deviation at 1 A = {deviation_1:.3f} ppm"
+
+    # The molecule-level (two-SCF) driver must reproduce the per-ring driver.
+    (mol_ring, mol_result), = run_sigma_only_molecule(
+        mol, [ring], backend, start=0.0, stop=1.0, step=1.0
+    )
+    assert mol_ring == ring
+    assert np.allclose(mol_result.nics_pi_zz, result.nics_pi_zz, atol=1e-4)
+
+
+@pytest.mark.slow
+def test_sigma_only_molecule_matches_per_ring(data_dir: Path) -> None:
+    """The two-SCF molecule driver reproduces the per-ring driver on every ring.
+
+    Phenalene has three rings, so the per-ring path runs 6 SCFs and the
+    molecule path 2; both must give the same NICS_pizz curves.
+    """
+    from aroma.backend.pyscf_nmr import PyscfNmrBackend
+
+    mol = load_geometry(data_dir / "phenalene/phenalene.in")
+    rings = select_rings(mol, "auto", planar_only=False)
+    backend = PyscfNmrBackend(method="hf", basis="sto-3g")
+
+    molecule_results = run_sigma_only_molecule(
+        mol, rings, backend, start=0.0, stop=1.0, step=0.5
+    )
+    for ring, mol_result in molecule_results:
+        per_ring = run_sigma_only_scan(
+            mol, ring, backend, start=0.0, stop=1.0, step=0.5
+        )
+        assert np.allclose(mol_result.nics_pi_zz, per_ring.nics_pi_zz, atol=1e-3)
+        assert np.allclose(mol_result.nics_iso_real, per_ring.nics_iso_real, atol=1e-3)

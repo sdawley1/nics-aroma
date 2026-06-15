@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 # ----- local modules -----
+from aroma.batch import select_rings
 from aroma.connectivity import adjacency_list, bond_matrix
 from aroma.io import load_geometry
 from aroma.molecule import Molecule
@@ -28,6 +29,7 @@ from aroma.sigma_only import (
     SigmaOnlyResult,
     fit_pi_zz,
     perceive_pi_centers,
+    run_sigma_only_molecule,
     run_sigma_only_scan,
     sigma_only_model,
 )
@@ -44,6 +46,17 @@ class _AtomCountBackend:
         n = float(mol.n_atoms)
         tensor = np.diag([n, n, 2.0 * n]).astype(np.float64)
         return np.broadcast_to(tensor, (ghosts.shape[0], 3, 3)).copy()
+
+
+class _CountingBackend(_AtomCountBackend):
+    """Like :class:`_AtomCountBackend`, but counts ``shielding`` invocations."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def shielding(self, mol: Molecule, ghosts: np.ndarray) -> np.ndarray:
+        self.calls += 1
+        return super().shielding(mol, ghosts)
 
 
 # ============================================================
@@ -133,6 +146,28 @@ def test_sigma_only_driver_subtracts(data_dir: Path) -> None:
     assert np.allclose(
         result.som_deviation, result.nics_pi_zz - result.three_delta_iso
     )
+
+
+def test_sigma_only_molecule_uses_two_scfs(data_dir: Path) -> None:
+    """A whole-molecule scan computes all rings in exactly two SCFs."""
+    mol = load_geometry(data_dir / "phenalene/phenalene.in")
+    rings = select_rings(mol, "auto", planar_only=False)
+    assert len(rings) == 3  # three fused six-membered rings
+
+    backend = _CountingBackend()
+    results = run_sigma_only_molecule(
+        mol, rings, backend, start=0.0, stop=1.0, step=0.5
+    )
+
+    assert backend.calls == 2  # one real + one model, NOT 2 * len(rings)
+    assert len(results) == len(rings)
+    for _ring, result in results:
+        assert result.distances.shape == (3,)
+        pi_zz = result.nics_zz_real - result.nics_zz_model
+        assert np.allclose(result.nics_pi_zz, pi_zz)
+        assert np.allclose(
+            result.som_deviation, result.nics_pi_zz - result.three_delta_iso
+        )
 
 
 def test_fit_pi_zz_recovers_cubic() -> None:
